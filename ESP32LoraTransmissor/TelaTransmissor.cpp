@@ -1,5 +1,6 @@
 #include "TelaTransmissor.h"
 #include "Configuracao.h"
+#include "../LayoutTela.h"
 
 TelaTransmissor::TelaTransmissor(const EstatisticasTransmissor& contadores)
     : estatisticas(contadores),
@@ -18,6 +19,7 @@ void TelaTransmissor::iniciar()
     delay(100);
     display.begin();
     display.setContrast(255);
+    protecao.registrarAtividade(millis());
 }
 
 void TelaTransmissor::mostrarInicializacao()
@@ -96,11 +98,27 @@ void TelaTransmissor::sincronizarEstatisticas()
     xSemaphoreGive(mutex);
 }
 
+void TelaTransmissor::registrarAtividade()
+{
+    xSemaphoreTake(mutex, portMAX_DELAY);
+    protecao.registrarAtividade(millis());
+    redesenhar = true;
+    xSemaphoreGive(mutex);
+}
+
 void TelaTransmissor::atualizar(bool avancar)
 {
-    const uint32_t agora = millis();
     xSemaphoreTake(mutex, portMAX_DELAY);
-    if (avancar) pagina = (pagina + 1) % 3;
+    const uint32_t agora = millis();
+    if (avancar)
+    {
+        redesenhar = true;
+        avancar = protecao.tocar(agora);
+    }
+    if (status.otaAtiva)
+        protecao.registrarAtividade(agora);
+    const bool proteger = protecao.atualizar(agora);
+    if (avancar && !status.otaAtiva) pagina = (pagina + 1) % Configuracao::TOTAL_PAGINAS_OLED;
     if (!primeiroDesenho && !redesenhar && !avancar &&
         uint32_t(agora - ultimaAtualizacao) < 250)
     {
@@ -116,12 +134,17 @@ void TelaTransmissor::atualizar(bool avancar)
     ultimaAtualizacao = agora;
     xSemaphoreGive(mutex);
 
-    desenharPagina(selecionada, estado, contadores);
-    if (avancar)
+    if (proteger)
+        ProtecaoTela::desenhar(display, agora);
+    else
+        desenharPagina(selecionada, estado, contadores);
+    if (avancar && !estado.otaAtiva)
     {
         Serial.print("OLED Transmissor - pagina ");
         Serial.print(selecionada + 1);
-        Serial.println("/3 - quadro enviado");
+        Serial.print("/");
+        Serial.print(Configuracao::TOTAL_PAGINAS_OLED);
+        Serial.println(" - quadro enviado");
     }
 }
 
@@ -131,56 +154,102 @@ void TelaTransmissor::desenharPagina(uint8_t selecionada, const EstadoTela& esta
     // Chamado exclusivamente pela tarefa OLED, no core 0.
     display.clearBuffer();
     display.setDrawColor(1);
-    display.setFont(u8g2_font_6x10_tf);
+    display.setFont(u8g2_font_5x8_tf);
+    if (estado.otaAtiva)
+    {
+        LayoutTela::cabecalho(display, "ATUALIZANDO", LayoutTela::Icone::Atualizacao,
+                             selecionada, Configuracao::TOTAL_PAGINAS_OLED);
+        display.setCursor(52, 26);
+        display.print(estado.progressoOTA);
+        display.print("%");
+        display.drawFrame(3, 32, 122, 16);
+        const uint8_t largura = (118 * estado.progressoOTA) / 100;
+        if (largura > 0) display.drawBox(5, 34, largura, 12);
+        LayoutTela::texto(display, 2, 60, estado.mensagemOTA);
+        display.sendBuffer();
+        return;
+    }
+    const char* titulos[] = {"", "ESTATISTICAS", "REDE / WIFI", "RADIO LoRa"};
+    const LayoutTela::Icone icones[] = {LayoutTela::Icone::Radio,
+        LayoutTela::Icone::Estatisticas, LayoutTela::Icone::Rede, LayoutTela::Icone::Radio};
+    LayoutTela::cabecalho(display, selecionada == 0 ? estado.titulo : String(titulos[selecionada]),
+                         icones[selecionada], selecionada, Configuracao::TOTAL_PAGINAS_OLED);
     if (selecionada == 0)
     {
-        display.drawStr(0, 10, estado.titulo.c_str());
+        LayoutTela::texto(display, 2, 24, String("GATEWAY  ") + estado.endereco);
         for (uint8_t i = 0; i < 3; ++i)
         {
-            display.drawStr(0, 27 + i * 16, estado.linhas[i].c_str());
+            LayoutTela::texto(display, 2, 36 + i * 12, estado.linhas[i]);
         }
     }
     else if (selecionada == 1)
     {
-        display.drawStr(0, 10, "ESTATISTICAS");
-        display.setCursor(0, 20);
-        display.print("Confirmados: ");
-        display.print(contadores.pacotesConfirmados);
-        display.setCursor(0, 30);
-        display.print("Sem ACK: ");
-        display.print(contadores.pacotesNaoConfirmados);
-        display.setCursor(0, 40);
-        display.print("Reenvios: ");
-        display.print(contadores.totalRetransmissoes);
-        display.setCursor(0, 50);
-        display.print("ACKs invalidos: ");
-        display.print(contadores.acksInvalidos);
-        display.setCursor(0, 60);
-        display.print("Erros CRC: ");
-        display.print(contadores.errosCRC);
+        LayoutTela::campo(display, 24, "Confirmados", contadores.pacotesConfirmados);
+        LayoutTela::campo(display, 33, "Sem ACK", contadores.pacotesNaoConfirmados);
+        LayoutTela::campo(display, 42, "Reenvios", contadores.totalRetransmissoes);
+        LayoutTela::campo(display, 51, "ACKs invalidos", contadores.acksInvalidos);
+        LayoutTela::campo(display, 60, "Erros CRC", contadores.errosCRC);
+    }
+    else if (selecionada == 2)
+    {
+        LayoutTela::texto(display, 2, 24, String("ID: ") + estado.endereco);
+        LayoutTela::texto(display, 2, 36, estado.rede);
+        LayoutTela::texto(display, 2, 48, String("IP: ") + estado.ip);
+        LayoutTela::texto(display, 2, 60, estado.conectada ? "WiFi: conectado" : "WiFi: acesso local");
     }
     else
     {
-        display.drawStr(0, 10, "CONFIGURACAO");
-        display.drawStr(0, 23, (String("ID: ") + estado.endereco).c_str());
-        display.drawStr(0, 35, estado.rede.c_str());
-        display.drawStr(0, 47, "Web: 192.168.4.1");
-        display.drawStr(0, 59, "915 MHz / SF9 / CR4/5");
+        display.setCursor(2, 24);
+        display.print("Freq: ");
+        display.print(Configuracao::FREQUENCIA_MHZ, 1);
+        display.print(" MHz");
+        display.setCursor(2, 33);
+        display.print("BW: ");
+        display.print(Configuracao::LARGURA_BANDA_KHZ, 1);
+        display.print(" kHz");
+        display.setCursor(2, 42);
+        display.print("SF: ");
+        display.print(Configuracao::SPREADING_FACTOR);
+        display.print(" / CR: 4/");
+        display.print(Configuracao::CODING_RATE);
+        display.setCursor(2, 51);
+        display.print("Sync:0x");
+        display.print(Configuracao::SYNC_WORD, HEX);
+        display.print(" / ");
+        display.print(Configuracao::POTENCIA_DBM);
+        display.print("dBm");
+        display.setCursor(2, 60);
+        display.print("Preambulo: ");
+        display.print(Configuracao::PREAMBULO);
     }
-    display.setDrawColor(0);
-    display.drawBox(108, 0, 20, 12);
-    display.setDrawColor(1);
-    display.setCursor(110, 10);
-    display.print(selecionada + 1);
-    display.print("/3");
     display.sendBuffer();
 }
 
-void TelaTransmissor::configurarRede(const String& endereco, const String& rede)
+void TelaTransmissor::configurarRede(const String& endereco, const String& rede,
+                                    const String& ip, bool conectada)
 {
     xSemaphoreTake(mutex, portMAX_DELAY);
     status.endereco = endereco;
     status.rede = rede;
+    status.ip = ip;
+    status.conectada = conectada;
     redesenhar = true;
     xSemaphoreGive(mutex);
+}
+
+void TelaTransmissor::mostrarProgressoOTA(uint8_t percentual, const String& mensagem, bool ativo)
+{
+    // Callback do upload publica dados; o desenho continua na tarefa OLED do core 0.
+    xSemaphoreTake(mutex, portMAX_DELAY);
+    status.otaAtiva = ativo;
+    status.progressoOTA = percentual > 100 ? 100 : percentual;
+    status.mensagemOTA = mensagem;
+    redesenhar = true;
+    xSemaphoreGive(mutex);
+}
+
+void TelaTransmissor::mostrarGateway(const String& fase, const String& detalhe)
+{
+    publicarStatus("GATEWAY LoRa", fase, detalhe,
+                   String("Consultas OK: ") + estatisticas.pacotesConfirmados);
 }

@@ -4,6 +4,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include "EstatisticasReceptor.h"
+#include "../ProtecaoTela.h"
 
 class TelaReceptor
 {
@@ -12,12 +13,13 @@ class TelaReceptor
     void iniciar();
     void configurarRede(const String& endereco, const String& rede);
     void atualizar(bool avancar);
+    void registrarAtividade();
     void sincronizarEstatisticas();
     void mostrarInicializacao();
     void mostrarAguardando();
     void mostrarPacote(unsigned long id, const String& mensagem, float rssi, bool duplicado);
-    void mostrarEnviandoACK(unsigned long id);
-    void mostrarACKEnviado(unsigned long id, bool duplicado);
+    void mostrarEnviandoResposta(unsigned long id);
+    void mostrarRespostaEnviada(unsigned long id, bool duplicado);
     void mostrarErro(const char* titulo, int codigo);
 
   private:
@@ -35,6 +37,7 @@ class TelaReceptor
                         const EstatisticasReceptor& contadores);
     SemaphoreHandle_t mutex = nullptr;
     uint8_t pagina = 0;
+    ProtecaoTela protecao;
     bool redesenhar = true;
     bool primeiroDesenho = true;
     uint32_t ultimaAtualizacao = 0;

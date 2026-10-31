@@ -4,17 +4,21 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include "EstatisticasTransmissor.h"
+#include "../ProtecaoTela.h"
 
 class TelaTransmissor
 {
 public:
     explicit TelaTransmissor(const EstatisticasTransmissor& contadores);
     void iniciar();
-    void configurarRede(const String& endereco, const String& rede);
+    void configurarRede(const String& endereco, const String& rede, const String& ip, bool conectada);
     void atualizar(bool avancar);
+    void registrarAtividade();
+    void mostrarProgressoOTA(uint8_t percentual, const String& mensagem, bool ativo);
     void sincronizarEstatisticas();
     void mostrarInicializacao();
     void mostrarPronto();
+    void mostrarGateway(const String& fase, const String& detalhe);
     void mostrarEnviando(unsigned long id, uint8_t tentativa);
     void mostrarAguardandoACK(unsigned long id, uint8_t tentativa);
     void mostrarACKRecebido(unsigned long id, float rssi, float snr, const String& receptor);
@@ -26,8 +30,13 @@ public:
 private:
     struct EstadoTela
     {
+        bool otaAtiva = false;
+        uint8_t progressoOTA = 0;
+        String mensagemOTA;
         String endereco;
         String rede;
+        String ip;
+        bool conectada = false;
         String titulo;
         String linhas[3];
     };
@@ -37,6 +46,7 @@ private:
                         const EstatisticasTransmissor& contadores);
     SemaphoreHandle_t mutex = nullptr;
     uint8_t pagina = 0;
+    ProtecaoTela protecao;
     bool redesenhar = true;
     bool primeiroDesenho = true;
     uint32_t ultimaAtualizacao = 0;

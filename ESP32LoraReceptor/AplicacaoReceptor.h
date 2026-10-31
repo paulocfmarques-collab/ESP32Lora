@@ -1,9 +1,13 @@
 #pragma once
-#include "RadioLoRa.h"
+#include "../RadioLoRa.h"
+#include "ComandosSerial.h"
 #include "ServidorConfiguracao.h"
-#include "ControlePaginas.h"
-#include "TarefaComunicacao.h"
+#include "../ControlePaginas.h"
+#include "../TarefaComunicacao.h"
 #include "TelaReceptor.h"
+#include "../MonitorComunicacao.h"
+#include "../DiagnosticoDispositivo.h"
+#include "../TransporteLoRa.h"
 
 class AplicacaoReceptor
 {
@@ -11,21 +15,29 @@ public:
     AplicacaoReceptor();
     void iniciar();
     void atenderConfiguracao();
-
 private:
     void executar();
+    bool enviarResposta(const ProtocoloLoRa::Quadro& pedido, const String& resposta);
+    bool aguardarConfirmacao(const ProtocoloLoRa::Quadro& pedido, uint8_t parte);
+    void publicarEstado(const char* fase, const String& peer = String());
     static void executarComunicacao(void* contexto);
     static void atualizarTela(void* contexto, bool avancar);
-    bool enviarACK(unsigned long idPacote, bool duplicado, const String& origemTransmissor);
     EnderecoDispositivo endereco;
+    ComandosSerial comandosSerial;
     ServidorConfiguracao configuracaoWeb;
-    String enderecoMostrado;
     EstatisticasReceptor estatisticas;
+    EstatisticasComunicacao estatisticasRPC;
     RadioLoRa radio;
     TelaReceptor tela;
     ControlePaginas controlePaginas;
     TarefaComunicacao comunicacao;
-    unsigned long ultimoIDRecebido = 0;
-    bool existeUltimoID = false;
-    String ultimaOrigemRecebida;
+    MonitorComunicacao monitor;
+    DiagnosticoDispositivo diagnostico;
+    TransporteLoRa transporte;
+    String enderecoMostrado;
+    bool temCache = false;
+    ProtocoloLoRa::Quadro pedidoCache;
+    String respostaCache;
+    uint32_t numeroPacote = 0;
+    uint8_t tentativaAtual = 0;
 };

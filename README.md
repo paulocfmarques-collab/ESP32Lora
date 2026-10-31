@@ -1,22 +1,22 @@
 <div align="center">
 
-# ESP32 LoRa Link
+# ESP32 LoRa Gateway
 
-### Addressed broadcast · Receiver-aware ACKs · Dual-core firmware
+### Python → UDP → Gateway → LoRa → Receiver → Response
 
-Two object-oriented Arduino applications for the **Heltec WiFi LoRa 32 V3**, with an OLED interface and browser-based device configuration.
+Addressed, on-demand diagnostics for **Heltec WiFi LoRa 32 V3** boards.
 
 ![Platform](https://img.shields.io/badge/ESP32--S3-Heltec_V3-172554?style=for-the-badge)
 ![Radio](https://img.shields.io/badge/SX1262-LoRa_915_MHz-0f766e?style=for-the-badge)
-![Language](https://img.shields.io/badge/C%2B%2B-Arduino-0284c7?style=for-the-badge)
+![Gateway](https://img.shields.io/badge/UDP-Gateway_4210-0284c7?style=for-the-badge)
 ![Runtime](https://img.shields.io/badge/FreeRTOS-Dual_Core-7c3aed?style=for-the-badge)
 
-![Configuration](https://img.shields.io/badge/Configuration-Web_UI-2563eb?style=flat-square)
-![Storage](https://img.shields.io/badge/Storage-Preferences_%2F_NVS-059669?style=flat-square)
-![Display](https://img.shields.io/badge/OLED-3_Pages-d97706?style=flat-square)
-![Diagrams](https://img.shields.io/badge/Diagrams-Mermaid-db2777?style=flat-square)
+![Commands](https://img.shields.io/badge/Diagnostics-Local_%2B_Remote-2563eb?style=flat-square)
+![OTA](https://img.shields.io/badge/Gateway_OTA-Web_%2B_Arduino_IDE-059669?style=flat-square)
+![Display](https://img.shields.io/badge/OLED-4_Pages-d97706?style=flat-square)
+![Storage](https://img.shields.io/badge/Configuration-Preferences_%2F_NVS-db2777?style=flat-square)
 
-[Quick start](#quick-start) · [Web configuration](#web-configuration) · [Protocol](#message-protocol) · [Architecture](#software-architecture) · [Troubleshooting](#diagnostics-and-troubleshooting) · [Changelog](CHANGELOG.md)
+[Quick start](#quick-start) · [Commands](#command-routing) · [Protocol](#lora-requestresponse-protocol) · [Architecture](#architecture) · [Wi-Fi](#network-and-device-configuration) · [Command reference](COMANDOS.md) · [Changelog](CHANGELOG.md)
 
 </div>
 
@@ -24,474 +24,497 @@ Two object-oriented Arduino applications for the **Heltec WiFi LoRa 32 V3**, wit
 
 ## At a glance
 
-| Capability | Implementation |
+| Role | Behavior |
 | :--- | :--- |
-| Hardware | Heltec WiFi LoRa 32 V3 with SX1262 and integrated 128 × 64 OLED |
-| Communication | Broadcast data with addressed acknowledgments |
-| Device identity | `TX01` transmitter default; `RXXX` receiver default |
-| Configuration | Local Wi-Fi access point and embedded web page |
-| Persistence | ESP32 Preferences, backed by NVS |
-| Execution | Button and OLED on core 0; LoRa task on core 1 |
-| Navigation | PRG/BOOT cycles through status, statistics, and configuration |
-| Delivery policy | First valid ACK confirms the packet |
-
-> [!IMPORTANT]
-> **An ACK confirms one receiver, not the entire broadcast group.** Both receivers may receive the same packet, but the transmitter stops retrying after the first valid acknowledgment. Simultaneous receiver ACKs can collide.
-
-## Network overview
-
-One transmitter can broadcast to multiple receivers. Each receiver includes its own configured address in its reply.
+| **Gateway — TX01** | Receives UDP queries, answers local diagnostics, or forwards a query to one addressed LoRa receiver. |
+| **Receiver — RX01 / RX02** | Listens for addressed requests, executes the shared diagnostics, and returns the result over LoRa. |
+| **Python client** | Sends `status:RX01` to the gateway and receives RX01's response on the same UDP socket. |
+| **Idle behavior** | No periodic application messages, demo broadcasts, or unsolicited receiver responses over LoRa. |
+| **Remote response** | Correlated by request ID and addresses, fragmented and confirmed, then reassembled before UDP delivery. |
 
 ```mermaid
 flowchart LR
-    TX["Transmitter<br/>TX01"]
-    RX1["Receiver A<br/>RX01"]
-    RX2["Receiver B<br/>RX02"]
-    CONFIG["Phone or computer<br/>Local web configuration"]
-
-    TX -->|"DATA to TODOS"| RX1
-    TX -->|"DATA to TODOS"| RX2
-    RX1 -.->|"ACK from RX01"| TX
-    RX2 -.->|"ACK from RX02"| TX
-    CONFIG ---|"Connect to one board's Wi-Fi AP"| TX
-    CONFIG ---|"Configure each board separately"| RX1
-    CONFIG --- RX2
-
-    classDef sender fill:#172554,color:#fff,stroke:#60a5fa
+    PY["Python client"] -->|"status:RX01 / UDP 4210"| GW["Gateway TX01"]
+    GW -->|"Addressed REQ"| RX1["Receiver RX01"]
+    GW -.->|"Other target when requested"| RX2["Receiver RX02"]
+    RX1 -->|"Fragmented RES"| GW
+    GW -->|"Reassembled RX01 response"| PY
+    classDef gateway fill:#172554,color:#fff,stroke:#60a5fa
     classDef receiver fill:#064e3b,color:#fff,stroke:#34d399
-    classDef browser fill:#3b0764,color:#fff,stroke:#c084fc
-    class TX sender
+    class GW gateway
     class RX1,RX2 receiver
-    class CONFIG browser
 ```
 
-The Wi-Fi connection is for local configuration. LoRa carries the application messages and ACKs.
+The gateway transmits an application request only after a client asks for remote
+data. Fragment confirmations and retries belong to that request. Wi-Fi services
+and local sensor sampling remain independent of application traffic over LoRa.
 
 ## Quick start
 
-### 1. Prepare the boards
+### 1. Install the firmware
 
-For the example network, use **three Heltec WiFi LoRa 32 V3 boards**: one transmitter and two receivers. Connect the appropriate LoRa antennas before operating the radios.
+Use Arduino IDE with the Espressif ESP32 platform, select **Heltec WiFi LoRa
+32(V3)**, and install **RadioLib** and **U8g2**. The remaining dependencies are
+provided by the ESP32 platform. Attach the appropriate LoRa antennas before use.
 
-In Arduino IDE:
-
-1. Install the Espressif ESP32 board package.
-2. Select **Heltec WiFi LoRa 32(V3)**.
-3. Install **RadioLib** and **U8g2** through Library Manager.
-4. Use a serial monitor speed of **115200 baud**.
-
-`WiFi`, `WebServer`, `Preferences`, and FreeRTOS are supplied by the ESP32 Arduino platform.
-
-### 2. Upload the matching sketch
-
-| Board | Sketch | Initial address |
+| Board | Sketch | Default address |
 | :--- | :--- | :--- |
-| Transmitter | [ESP32LoraTransmissor.ino](ESP32LoraTransmissor/ESP32LoraTransmissor.ino) | `TX01` |
+| Gateway | [ESP32LoraTransmissor.ino](ESP32LoraTransmissor/ESP32LoraTransmissor.ino) | `TX01` |
 | Receiver A | [ESP32LoraReceptor.ino](ESP32LoraReceptor/ESP32LoraReceptor.ino) | `RXXX` |
 | Receiver B | Same receiver sketch | `RXXX` |
 
-Open the `.ino` inside its own directory. Arduino builds the adjacent `.cpp` files automatically.
+Open each `.ino` in its own folder; adjacent `.cpp` files build automatically.
+Keep the parent `ESP32Lora` folder and its shared sources beside both sketch
+folders. Each sketch's `ComponentesComuns.cpp` includes the parent implementations;
+do not copy those implementations into the sketch or compile them a second time.
 
-> [!NOTE]
-> Both receivers initially use `RXXX`. Assign distinct addresses, such as `RX01` and `RX02`, through the web page before using them together. A previously saved address takes precedence over the firmware default.
+> [!IMPORTANT]
+> **Update the gateway and every receiver together.** The new `REQ` / `RES` / `RAK`
+> protocol replaces the previous demo's `DATA` / `ACK` format. Old firmware is not
+> compatible. Existing addresses and Wi-Fi settings remain in Preferences.
 
-### 3. Configure and run
+### 2. Give each receiver a unique address
 
-1. Press PRG/BOOT until OLED page **3/3** appears.
-2. Join the board's Wi-Fi network using password **`configlora`**.
-3. Open **[http://192.168.4.1](http://192.168.4.1)**.
-4. Enter the device address and select **Salvar endereço** (Save address).
-5. Observe packet and ACK activity on OLED page 1 or in the serial monitor.
-
-The transmitter sends `Ola Mundo` with a new packet ID on each application cycle. Retries keep the same ID.
-
-## Web configuration
-
-### Connection details
-
-| Setting | Transmitter | Receiver |
-| :--- | :--- | :--- |
-| Wi-Fi network | `LoRa-TX-XXXXXX` | `LoRa-RX-XXXXXX` |
-| Network suffix | Derived from the board's hardware identity | Derived from the board's hardware identity |
-| Default Wi-Fi password | `configlora` | `configlora` |
-| Configuration URL | `http://192.168.4.1` | `http://192.168.4.1` |
-| Default device address | `TX01` | `RXXX` |
-
-Each board creates its own access point. The physical suffix distinguishes networks even when several receivers still have the `RXXX` address. Connect to one board at a time; this Wi-Fi network does not provide internet access.
-
-### Address rules
-
-- Use **1–16 characters**: letters, digits, hyphens, or underscores.
-- Leading and trailing whitespace is removed; letters become uppercase.
-- `TODOS` is reserved for broadcast and cannot be a device address.
-- Give every board a different address.
-- Saving applies the address without rebooting. An already-running transmission keeps its original source address through its retries.
-
-### Save and restore lifecycle
-
-```mermaid
-flowchart TD
-    BOOT["Power on"] --> OPEN["Open Preferences<br/>namespace: lora-config"]
-    OPEN --> VALID{"Valid saved address?"}
-    VALID -->|Yes| RESTORE["Load saved address"]
-    VALID -->|No| DEFAULT["Use and persist default<br/>TX01 or RXXX"]
-    RESTORE --> ACTIVE["Active device identity"]
-    DEFAULT --> ACTIVE
-
-    FORM["Browser submits address"] --> NORMALIZE["Trim and uppercase"]
-    NORMALIZE --> CHECK{"Valid and not TODOS?"}
-    CHECK -->|No| REJECT["Return validation error"]
-    CHECK -->|Yes| WRITE["Write Preferences key: endereco"]
-    WRITE --> RESULT{"Write succeeded?"}
-    RESULT -->|No| KEEP["Keep previous active address<br/>Show save error"]
-    RESULT -->|Yes| APPLY["Update active address<br/>No reboot required"]
-    APPLY --> ACTIVE
-
-    classDef storage fill:#064e3b,color:#fff,stroke:#34d399
-    classDef failure fill:#450a0a,color:#fff,stroke:#f87171
-    class OPEN,WRITE,RESTORE,DEFAULT storage
-    class REJECT,KEEP failure
-```
-
-| HTTP route | Purpose |
-| :--- | :--- |
-| `GET /` | Display the current address and configuration form |
-| `POST /endereco` | Validate and persist an address; requires the form token |
-
-Persistence uses namespace **`lora-config`** and key **`endereco`**. If storage cannot initialize, the application uses its default address in RAM and reports the issue over serial.
-
-## OLED interface
-
-Press **PRG/BOOT** once to advance. Holding it causes one advance; release it before pressing again. **RST** restarts the board.
-
-```mermaid
-stateDiagram-v2
-    direction LR
-    [*] --> Status
-    Status --> Statistics: PRG / BOOT
-    Statistics --> Configuration: PRG / BOOT
-    Configuration --> Status: PRG / BOOT
-    state "1/3 · Communication status" as Status
-    state "2/3 · Device statistics" as Statistics
-    state "3/3 · Address and web access" as Configuration
-```
-
-| Page | Contents |
-| :--- | :--- |
-| **1/3 — Status** | Current communication state, received message or ACK details, and errors |
-| **2/3 — Statistics** | Packet, acknowledgment, retry, and error counters for the current role |
-| **3/3 — Configuration** | Device address, Wi-Fi network, web access IP, and a radio settings summary |
-
-The selected page persists across communication events. All pages are refreshed approximately every **250 ms**, with updates also requested when state or page selection changes.
-
-The button task samples every **10 ms** and applies **40 ms** debounce. Confirmed presses accumulate in task notifications while the OLED task is busy.
-
-## Message protocol
-
-Messages are pipe-delimited text. Field names below describe the format; the actual broadcast value remains **`TODOS`**.
-
-| Message | Format | Example |
-| :--- | :--- | :--- |
-| Data | `DATA\|source\|destination\|packet_id\|message` | `DATA\|TX01\|TODOS\|123\|Ola Mundo` |
-| Acknowledgment | `ACK\|source\|destination\|packet_id` | `ACK\|RX01\|TX01\|123` |
+Connect each receiver by USB, open a **115200-baud** serial monitor, and select
+**Newline** or **Both NL & CR**. Configure one board at a time:
 
 ```text
-DATA|TX01|TODOS|123|Ola Mundo
-     └─┬┘ └─┬─┘ └┬┘ └───┬───┘
-     source  all   ID    payload
-
-ACK|RX01|TX01|123
-    └─┬┘ └─┬┘ └┬┘
-    source  to  confirmed ID
+endereco RX01
+endereco?
 ```
 
-The transmitter currently sends to `TODOS`. Receiver parsing also supports a specific destination, accepting a packet only when it targets `TODOS` or the receiver's own address.
+Use `endereco RX02` on the second receiver. `ajuda` prints serial help. These
+changes apply without a reboot and persist after power-off. The receiver's local
+web page can also change its address.
 
-An ACK is accepted only when its format is valid, its destination matches the source used for the transmission, and its packet ID matches the pending packet. The receiver address appears in the transmitter's serial output and ACK screen.
+### 3. Connect the gateway to Wi-Fi
 
-### Successful exchange
+Join its `LoRa-TX-XXXXXX` access point with password **`configlora`** and open
+**[http://192.168.4.1/config](http://192.168.4.1/config)**. Save your router SSID and
+password. Once connected, **OLED page 3/4** shows the router SSID and gateway's
+actual IP address. Put the Python computer on the same network.
+
+### 4. Query a receiver
+
+Replace the example IP with the gateway IP shown on its OLED:
+
+```sh
+python tools/udp_query.py 192.168.1.50 status:RX01
+python tools/udp_query.py 192.168.1.50 temp:RX01 ram:RX01 flash:RX02
+python tools/udp_query.py 192.168.1.50 battery:RX01 status_json:RX02
+```
+
+The [Python client](tools/udp_query.py) requires only the standard library. It
+waits **75 seconds for remote queries**, or **3 seconds for local queries**, unless
+`--timeout` is supplied. Large LoRa responses take several seconds.
+
+## OLED screensaver
+
+The four information pages share icon headers, highlighted page numbers,
+aligned counters, and scrolling text for long titles, network names, and status
+messages. Radio settings and OTA progress remain available.
+
+Both boards show animated robot faces after **5 minutes of inactivity**.
+A button press wakes the display without changing the selected page. Incoming
+UDP commands on the gateway, addressed LoRa requests on a receiver, and receiver
+serial commands also wake it and restart the timer. Background status refreshes
+do not restart it; OTA progress takes priority. Communication stays active.
+
+## Command routing
+
+Send one ASCII command per UDP datagram to the **gateway**, port **4210**.
+Commands and addresses are case-insensitive; surrounding spaces are ignored.
+Command names, help output, and examples use lowercase. Device addresses,
+LoRa frame markers, and response field names retain their existing format.
+
+| Request sent to gateway | Executed on |
+| :--- | :--- |
+| `status` | Gateway itself |
+| `status:TX01` | Gateway itself, if its current address is TX01 |
+| `status:RX01` | Receiver RX01, through LoRa |
+| `status_json:RX02` | Receiver RX02; reassembled JSON returned to the client |
+| `name:RX01` | Receiver RX01; returns its configured address |
+
+A receiver responds only to its exact address. Broadcast targets are not accepted
+for queries. IDs such as `RXXX` must be unique before multiple receivers are used.
+
+| Query | Information available on both roles |
+| :--- | :--- |
+| `help` | Command list starting with `COMANDOS` |
+| `name` / `alive` | Configured address / liveness |
+| `info` / `status` | Summary of the queried device |
+| `status_json` / `info_json` | Structured summary |
+| `temp` / `cpu` | Internal CPU temperature, model, revision, cores, and clock |
+| `ram` / `heap` | Heap total, free, minimum, largest block, and PSRAM |
+| `flash` | Physical capacity, firmware size, active partition, and OTA slot size |
+| `net_info` / `ip` / `mac` / `rssi` | Queried device's Wi-Fi information |
+| `radio` / `radio_status` | Tracked driver mode, result code, settings, and latest receive metrics |
+| `counters` | Transactions, requests, responses, fragments, retries, and errors |
+| `battery` / `vbat` | Queried board's estimated VBAT voltage and sample age |
+| `ota_status` | Update support, state, and progress |
+| `udp_status` | Local listener status; receivers report that they use LoRa via the gateway |
+| `build` / `version` / `reason` / `uptime` | Role-specific build, reset cause, and uptime |
+
+The executor is shared by both sketches. Unsupported hardware or services are
+reported honestly: receiver firmware does not run an OTA server or a UDP listener,
+so its status commands report those capabilities as unavailable. `flash` still
+reports the receiver's actual physical memory and available application slot.
+
+See [COMANDOS.md](COMANDOS.md) for command details and response interpretation.
+All network commands are queries; they do not change settings or reboot a board.
+
+## LoRa request/response protocol
+
+| Frame | Format |
+| :--- | :--- |
+| Request | `REQ\|gateway\|receiver\|id\|command` |
+| Response fragment | `RES\|receiver\|gateway\|id\|part\|total\|payload` |
+| Fragment confirmation | `RAK\|gateway\|receiver\|id\|part` |
+
+For example:
+
+```text
+REQ|TX01|RX01|123|status
+RES|RX01|TX01|123|1|1|<response payload>
+RAK|TX01|RX01|123|1
+```
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant TX as TX01 · Transmitter
-    participant RX as RX01 · Receiver
-    TX->>RX: DATA|TX01|TODOS|123|Ola Mundo
-    TX->>TX: Enter receive mode
-    RX->>RX: Validate destination and packet ID
-    RX->>RX: Check last source + ID for duplicates
-    Note over RX: Wait 250 ms before ACK
-    RX-->>TX: ACK|RX01|TX01|123
-    TX->>TX: Validate ACK destination and packet ID
-    TX->>TX: Record confirmed packet and responding receiver
-    Note over TX: Wait 5000 ms after the application cycle
-```
-
-### Retry behavior
-
-```mermaid
-stateDiagram-v2
-    [*] --> NewPacket
-    NewPacket --> Transmit: Allocate next packet ID
-    Transmit --> AwaitACK: Transmission succeeds
-    Transmit --> RetryDecision: Transmission fails
-    AwaitACK --> Confirmed: Matching valid ACK
-    AwaitACK --> RetryDecision: Timeout, CRC error or invalid ACK
-    RetryDecision --> Backoff: Fewer than 3 attempts used
-    Backoff --> Transmit: Wait 700–1499 ms / reuse same packet
-    RetryDecision --> Unconfirmed: 3 attempts exhausted
-    Confirmed --> Interval
-    Unconfirmed --> Interval
-    Interval --> NewPacket: Wait 5000 ms
-```
-
-A receiver remembers the **last source address and packet ID** in RAM. A matching retransmission increments the duplicate counter and is acknowledged again. This is a last-packet check, not a persistent history of all previously received messages.
-
-## Software architecture
-
-The firmware uses composition and classes with separate responsibilities. Source identifiers remain in Portuguese; this documentation describes them in English.
-
-```mermaid
-classDiagram
-    class Application {
-        +iniciar()
-        +atenderConfiguracao()
-        -executar()
-    }
-    class RadioLoRa {
-        +iniciar()
-        +transmit()
-        +receive()
-    }
-    class ProtocoloLoRa {
-        +criarDados()
-        +criarACK()
-        +interpretarPacote()
-        +interpretarACK()
-    }
-    class Display {
-        -publicarStatus()
-        +configurarRede()
-        +atualizar()
-    }
-    class ControlePaginas
-    class TarefaComunicacao
-    class EnderecoDispositivo {
-        +obter()
-        +salvar()
-    }
-    class ServidorConfiguracao {
-        +iniciar()
-        +atender()
-    }
-    class Statistics
-
-    Application *-- RadioLoRa
-    Application ..> ProtocoloLoRa
-    Application *-- Display
-    Application *-- Statistics
-    Application *-- ControlePaginas
-    Application *-- TarefaComunicacao
-    Application *-- EnderecoDispositivo
-    Application *-- ServidorConfiguracao
-    ServidorConfiguracao --> EnderecoDispositivo : persists identity
-    ControlePaginas ..> Display : invokes update callback
-    TarefaComunicacao ..> Application : invokes cycle callback
-    Display --> Statistics : copies counters
-```
-
-`Application`, `Display`, and `Statistics` represent the role-specific `AplicacaoTransmissor` / `AplicacaoReceptor`, `TelaTransmissor` / `TelaReceptor`, and `EstatisticasTransmissor` / `EstatisticasReceptor` classes. `publicarStatus()` is a private display helper.
-
-### Dual-core execution
-
-```mermaid
-flowchart TB
-    SETUP["Arduino setup<br/>Restore identity and initialize services"]
-    SETUP --> BUTTON
-    SETUP --> OLED
-    SETUP --> RADIO
-    SETUP --> WEB
-
-    subgraph CORE0["Core 0 · User interface"]
-        BUTTON["Button task<br/>Priority 2 · 2048-byte stack"]
-        NOTIFY["Accumulated press notifications"]
-        OLED["OLED task<br/>Priority 1 · 4096-byte stack"]
-        BUTTON --> NOTIFY --> OLED
+    participant C as Python client
+    participant G as Gateway TX01
+    participant R as Receiver RX01
+    C->>G: status:RX01 over UDP
+    G->>G: Queue request with client ip and port
+    G->>R: REQ with unique transaction ID
+    R->>R: Execute status against local diagnostics
+    loop Each response fragment
+        R-->>G: RES with matching ID and addresses
+        G->>G: Validate and append new fragment
+        G-->>R: RAK for this fragment
     end
-
-    subgraph CORE1["Core 1 · Communication"]
-        RADIO["LoRa task<br/>Priority 1 · 8192-byte stack"]
-    end
-
-    subgraph ARDUINO["Arduino loop · Core selected by board settings"]
-        WEB["Handle local HTTP requests"]
-    end
-
-    SNAPSHOT["Mutex-protected text and counter snapshots"]
-    RADIO -->|"Publish status"| SNAPSHOT
-    WEB -->|"Publish updated identity"| SNAPSHOT
-    SNAPSHOT -->|"Copy then release mutex"| OLED
-    OLED -->|"Draw and send frame"| SCREEN["128 × 64 OLED"]
-
-    classDef ui fill:#172554,color:#fff,stroke:#60a5fa
-    classDef radio fill:#064e3b,color:#fff,stroke:#34d399
-    class BUTTON,NOTIFY,OLED ui
-    class RADIO radio
+    G-->>C: Complete response on the original UDP socket
+    Note over G,R: Retries reuse the transaction ID
 ```
 
-The LoRa task publishes text and counters rather than drawing into the display buffer. After initialization, the OLED task owns drawing and frame transmission; I²C transfers happen outside the data mutex. The Arduino loop services the web page without duplicating the LoRa application cycle.
+### Fragmentation and retries
 
-### Receiver processing
+A response can contain up to **1400 bytes**. It is split into **160-byte payloads**,
+with at most **nine fragments**, keeping every complete LoRa frame within the
+SX1262's 255-byte limit. UTF-8 data is reassembled as bytes before UDP delivery.
 
 ```mermaid
 flowchart TD
-    RECEIVE["Receive a LoRa frame"] --> VALID{"Valid addressed DATA packet?"}
-    VALID -->|No| IGNORE["Ignore / report format error"]
-    VALID -->|Yes| DEST{"Destination is TODOS<br/>or this receiver?"}
-    DEST -->|No| SKIP["Ignore packet"]
-    DEST -->|Yes| DUP{"Matches last source + ID?"}
-    DUP -->|Yes| COUNTD["Increment duplicate counter"]
-    DUP -->|No| COUNTN["Increment new-packet counter<br/>Remember source + ID"]
-    COUNTD --> STATUS["Publish status to OLED task"]
-    COUNTN --> STATUS
-    STATUS --> ACK["Send ACK with local receiver address"]
-    ACK --> WAIT["Return to receive cycle"]
+    build["Receiver builds one bounded response"] --> SPLIT["Split into numbered fragments"]
+    SPLIT --> SEND["Send current fragment"]
+    SEND --> ACK{"Matching RAK received?"}
+    ACK -->|No| RETRY{"Attempts remain?"}
+    RETRY -->|Yes| SEND
+    RETRY -->|No| FAIL["Record response failure and return to listening"]
+    ACK -->|Yes| MORE{"More fragments?"}
+    MORE -->|Yes| SEND
+    MORE -->|No| DONE["Return to listening"]
 ```
 
-## Hardware reference
+The gateway checks source, destination, transaction ID, fragment count, order, and
+payload limits. Duplicate fragments are acknowledged without appending their bytes
+again. The receiver caches its last request and response, so retrying the same
+request does not execute it again or mix readings from different snapshots.
 
-### Pin mapping
+A short completion window lets the gateway repeat the last fragment confirmation
+if needed. Each UDP request retains its own client IP and source port; a late
+response from a different transaction is ignored.
 
-Both sketches use the same Heltec V3 pin assignments.
+### Gateway lifecycle
 
-| Component | Signal | ESP32 GPIO |
-| :--- | :--- | ---: |
-| SX1262 | NSS / chip select | `8` |
-| SX1262 | DIO1 | `14` |
-| SX1262 | Reset | `12` |
-| SX1262 | Busy | `13` |
-| OLED | SDA | `17` |
-| OLED | SCL | `18` |
-| OLED | Reset | `21` |
-| OLED power | Vext, enabled with LOW | `36` |
-| PRG/BOOT | Page navigation, active LOW | `0` |
+```mermaid
+stateDiagram-v2
+    [*] --> Idle
+    Idle --> Queue: Remote UDP query arrives
+    Queue --> Request: Radio worker takes the job
+    Request --> Receive: Send addressed REQ
+    Receive --> Request: Initial response timeout and attempts remain
+    Receive --> Assemble: Matching RES received
+    Assemble --> Receive: Confirm fragment and await next
+    Assemble --> Reply: Complete response
+    Receive --> Error: Deadline or retry limit exceeded
+    Error --> Reply: Prepare client error
+    Reply --> Idle: Return result to original UDP client
+```
 
-The SX1262 module uses the board variant's SPI pin definitions. The OLED uses software I²C through U8g2.
+### Receiver lifecycle
 
-### Radio settings
+```mermaid
+stateDiagram-v2
+    [*] --> Listening
+    Listening --> Listening: Foreign target or unrelated frame
+    Listening --> Execute: New addressed REQ
+    Listening --> Cached: Duplicate cached REQ
+    Execute --> Respond: Capture local diagnostic response
+    Cached --> Respond: Reuse cached bytes
+    Respond --> Confirm: Send RES fragment
+    Confirm --> Respond: Retry or next fragment
+    Confirm --> Listening: Complete response or attempts exhausted
+```
 
-| Parameter | Value |
+## Architecture
+
+### Core and task ownership
+
+```mermaid
+flowchart TB
+    CLIENT["UDP client"] --> UDP["Gateway UDP task / core 0"]
+    UDP -->|"Local query"| DIAG["Shared diagnostic executor"]
+    UDP -->|"Remote query"| JOBS["Bounded request queue"]
+    JOBS --> GW["Gateway LoRa worker / core 1"]
+    GW <-->|"REQ / RES / RAK"| RX["Receiver LoRa worker / core 1"]
+    RX --> RDIAG["Receiver diagnostic executor"]
+    GW --> RESULTS["Bounded result queue"]
+    RESULTS --> UDP
+    UI["Button and OLED tasks / core 0"] --> DISPLAY["Four OLED pages"]
+    SNAP["Synchronized application, radio and sensor snapshots"] -.-> DIAG
+    SNAP -.-> RDIAG
+```
+
+Only the LoRa worker in each sketch calls the SX1262 driver. The UDP task queues
+remote jobs and returns completed responses; it never accesses SPI concurrently.
+The receiver's Arduino loop maintains serial configuration, its web page, and the
+sensor cache. The gateway's UDP task maintains its local diagnostic sensor cache.
+
+Button and OLED tasks remain independent. The gateway retains its web and
+ArduinoOTA services; both use synchronized update snapshots for diagnostics.
+
+### Classes and responsibilities
+
+```mermaid
+classDiagram
+    class AplicacaoTransmissor
+    class AplicacaoReceptor
+    class ComandosUDP
+    class CanalGateway
+    class DiagnosticoDispositivo
+    class MonitorComunicacao
+    class TransporteLoRa
+    class ProtocoloLoRa
+    class RadioLoRa
+    class LeitorBateria
+    AplicacaoTransmissor *-- ComandosUDP
+    AplicacaoTransmissor *-- CanalGateway
+    ComandosUDP --> CanalGateway : enqueue and return
+    ComandosUDP --> DiagnosticoDispositivo : local queries
+    AplicacaoTransmissor --> TransporteLoRa
+    AplicacaoReceptor --> TransporteLoRa
+    AplicacaoReceptor --> DiagnosticoDispositivo : addressed requests
+    TransporteLoRa --> RadioLoRa
+    TransporteLoRa --> ProtocoloLoRa
+    DiagnosticoDispositivo --> MonitorComunicacao
+    DiagnosticoDispositivo *-- LeitorBateria
+```
+
+| Component | Responsibility |
 | :--- | :--- |
-| Frequency | `915.0 MHz` |
-| Bandwidth | `125.0 kHz` |
-| Spreading factor | `SF9` |
-| Coding rate | `4/5` |
-| Sync word | `0x12` |
-| Transmit power | `20 dBm` |
-| Preamble | `8 symbols` |
+| `CanalGateway` | Four-entry request/result queues and client correlation |
+| `ComandosUDP` | UDP transport, local/remote routing, and delivery back to clients |
+| `DiagnosticoDispositivo` | Shared command catalog and device-local diagnostics |
+| `ProtocoloLoRa` | Bounded addressed RPC frame encoding and parsing |
+| `TransporteLoRa` | Frame transmission/reception, exclusively from the radio worker |
+| `MonitorComunicacao` | Cross-core snapshots of transaction state and counters |
+| `RadioLoRa` | SX1262 ownership and tracked driver operation state |
+| `LeitorBateria` | Nonblocking ADC settling and averaged battery samples |
+| `EnderecoDispositivo` | Validated device address and NVS persistence |
+| `ServidorConfiguracao` | Role-specific HTTP configuration and gateway network services |
 
-These values are set in `RadioLoRa::iniciar()` in each sketch. Keep them aligned across all boards.
+### Shared source organization
 
-### Timing and buffer settings
+Common code lives directly in the parent `ESP32Lora` folder, alongside
+[LayoutTela.h](LayoutTela.h) and [ProtecaoTela.h](ProtecaoTela.h):
 
-| Parameter | Default | Location |
+| Shared files | Responsibility |
+| :--- | :--- |
+| [ConfiguracaoComum.h](ConfiguracaoComum.h) | Heltec pinout, radio settings, RPC limits, battery timing, and task cores |
+| [ControlePaginas.h](ControlePaginas.h) / [cpp](ControlePaginas.cpp) | Button debounce and OLED task |
+| [EnderecoDispositivo.h](EnderecoDispositivo.h) / [cpp](EnderecoDispositivo.cpp) | Address validation and NVS; each application supplies its own default address |
+| [RadioLoRa.h](RadioLoRa.h) / [cpp](RadioLoRa.cpp) | SX1262 driver and synchronized radio state |
+| [ProtocoloLoRa.h](ProtocoloLoRa.h) / [cpp](ProtocoloLoRa.cpp) | REQ, RES, and RAK encoding and parsing |
+| [TransporteLoRa.h](TransporteLoRa.h) / [cpp](TransporteLoRa.cpp) | LoRa frame transport |
+| [TarefaComunicacao.h](TarefaComunicacao.h) / [cpp](TarefaComunicacao.cpp) | Radio worker task |
+| [LeitorBateria.h](LeitorBateria.h) / [cpp](LeitorBateria.cpp) | Nonblocking battery sampling |
+| [MonitorComunicacao.h](MonitorComunicacao.h), [EstatisticasComunicacao.h](EstatisticasComunicacao.h), [EstadoOTA.h](EstadoOTA.h) | Shared snapshots and counters |
+| [DiagnosticoDispositivo.h](DiagnosticoDispositivo.h) / [cpp](DiagnosticoDispositivo.cpp) | Common diagnostic interface, sensor cache, JSON escaping, and network/OTA helpers |
+
+Sketch headers reference shared headers through `../`. Arduino compiles each
+sketch's `ComponentesComuns.cpp`, which includes the shared implementations once.
+Changes to a shared source apply to both firmwares.
+
+Each sketch retains its application, display data, command transport, web services,
+and `Configuracao.h` with role-specific project name, default address, and OTA
+settings. The local `DiagnosticoDispositivo.cpp` files retain role-specific response
+formatting, including existing field capitalization and service availability.
+Do not move or distribute a sketch folder without its parent shared sources.
+
+## Network and device configuration
+
+| Setting | Gateway | Receiver |
 | :--- | :--- | :--- |
-| Maximum attempts per packet | `3` total attempts | TX `Configuracao.h` |
-| ACK receive timeout | `3000 ms` | TX `Configuracao.h` |
-| Delay between packet cycles | `5000 ms` after the cycle completes | TX `Configuracao.h` |
-| Retry backoff | `700–1499 ms` | TX application |
-| Receiver wait timeout | `5000 ms` | RX `Configuracao.h` |
-| Delay before sending ACK | `250 ms` | RX `Configuracao.h` |
-| Data receive buffer | `128 bytes`, one reserved for termination | RX `Configuracao.h` |
-| ACK receive buffer | `64 bytes`, one reserved for termination | TX `Configuracao.h` |
-| Button debounce | `40 ms` | Both `Configuracao.h` files |
-| OLED refresh interval | Approximately `250 ms` | Both display classes |
+| Device address default | `TX01` | `RXXX` |
+| AP SSID | `LoRa-TX-XXXXXX` | `LoRa-RX-XXXXXX` |
+| Default AP password | `configlora` | `configlora` |
+| Local web access | `http://192.168.4.1` | `http://192.168.4.1` |
+| Router connection | Up to five saved Wi-Fi networks | Not implemented |
+| UDP commands | Port 4210 | Through gateway over LoRa |
+| Firmware OTA | Browser and Arduino IDE | Not implemented |
 
-The transmission interval is not a fixed five-second start-to-start schedule: packet airtime, ACK waits, retries, and backoff add to each cycle.
+The AP password must be empty for an open network, or 8–63 characters for a
+password-protected network. A compile-time check rejects invalid lengths.
 
-## Repository layout
+Device addresses accept 1–16 letters, digits, hyphens, or underscores. They are
+normalized to uppercase, and `TODOS` is reserved. The gateway uses a captured
+source address during a transaction; an address change applies to later requests.
 
-```text
-ESP32Lora/
-├── README.md
-├── CHANGELOG.md
-├── ESP32LoraTransmissor/
-│   ├── ESP32LoraTransmissor.ino
-│   ├── AplicacaoTransmissor.h / .cpp
-│   ├── TelaTransmissor.h / .cpp
-│   ├── EstatisticasTransmissor.h
-│   ├── Configuracao.h
-│   └── shared-role classes listed below
-└── ESP32LoraReceptor/
-    ├── ESP32LoraReceptor.ino
-    ├── AplicacaoReceptor.h / .cpp
-    ├── TelaReceptor.h / .cpp
-    ├── EstatisticasReceptor.h
-    ├── Configuracao.h
-    └── shared-role classes listed below
+```mermaid
+flowchart LR
+    INPUT["Web address form or receiver serial command"] --> VALIDATE["Normalize and validate"]
+    VALIDATE --> STORE["Preferences: lora-config / endereco"]
+    STORE --> ACTIVE["Active identity"]
+    REBOOT["Power on"] --> RESTORE["Restore saved identity or persist default"]
+    RESTORE --> ACTIVE
 ```
 
-Each sketch contains its own `.h` / `.cpp` copies of:
+### Gateway Wi-Fi and IP
 
-| Class | Responsibility |
+The M5NanoC6-inspired form at `/config` stores up to five networks in Preferences
+namespace **`lora-wifi`**, key **`redes`**. An empty SSID removes a slot; an empty
+password preserves the previous password only if that SSID is unchanged. The
+**Rede aberta** option explicitly clears a password. Saved passwords are not
+returned to clients.
+
+The manager tries saved slots in order with a 13-second timeout per attempt.
+Searches for nearby networks are asynchronous. AP + STA mode retains local
+configuration while a router connection is attempted, although shared Wi-Fi
+channel changes can briefly interrupt an AP client's connection.
+
+When connected to a router, page **3/4** shows its **SSID and the gateway's DHCP
+IP**. Open `http://<ip-shown>/config` or `/ota` from the same network. Without that
+connection, the OLED shows local AP information instead. The web server listens
+on port 80 across the available Wi-Fi interfaces.
+
+## OLED pages
+
+PRG/BOOT cycles **1 → 2 → 3 → 4 → 1**. Holding the button advances once; release it
+before pressing again. RST restarts the board.
+
+| Page | Contents |
 | :--- | :--- |
-| `RadioLoRa` | SX1262 ownership, initialization, transmission, and reception |
-| `ProtocoloLoRa` | Message encoding and addressed packet parsing |
-| `EnderecoDispositivo` | Address validation, synchronized access, and Preferences storage |
-| `ServidorConfiguracao` | Wi-Fi AP, embedded page, and HTTP handlers |
-| `ControlePaginas` | Independent button and OLED tasks |
-| `TarefaComunicacao` | Application cycle pinned to the communication core |
+| **1 — Status** | Gateway query progress or receiver request/response status |
+| **2 — Statistics** | Role-specific request/response counters and errors |
+| **3 — Network** | Device identity, SSID, IP, and connection information |
+| **4 — Radio** | Frequency, bandwidth, SF, coding rate, sync word, power, preamble |
 
-> [!TIP]
-> The directories are independent Arduino sketches, not consumers of a shared library. Apply changes to common classes and matching radio parameters in both directories.
+All pages refresh periodically. The button uses 40 ms debounce and a separate
+sampling task. During gateway OTA, a temporary overlay shows percentage, a progress
+bar, and update state; 100% is displayed after successful firmware validation.
 
-## Diagnostics and troubleshooting
+## Gateway firmware OTA
 
-| Symptom | What to check |
+Both update methods remain available **without a password or login screen**:
+
+- **Browser:** open `http://<gateway-ip>/ota` and upload
+  `ESP32LoraTransmissor.ino.bin`.
+- **Arduino IDE:** after installing this firmware and connecting gateway and
+  computer to the same network, select **LoRa-TX01** under **Tools → Port**.
+  ArduinoOTA uses port **3232** and mDNS discovery.
+
+A firmware version without ArduinoOTA must be updated once by USB or the existing
+browser updater before the IDE can discover it. Local mDNS and upload traffic must
+be allowed by the computer and network; guest-client isolation can prevent access.
+
+The updater requires a distinct inactive OTA application slot. The installed
+Heltec V3 `default_8MB` layout has two `0x330000`-byte application slots. If the
+running board has no OTA-capable layout, install one by USB first. Upload only the
+application binary, never bootloader, partitions, merged images, or receiver firmware.
+
+HTTP upload checks size, ESP32-S3 application headers, and the application
+descriptor. Platform image validation precedes boot selection. Both transports
+share `Update` and are serviced separately. After success, the board restarts
+after approximately two seconds. This does not provide automatic recovery from
+application-level bugs after a successful boot. Addresses and Wi-Fi settings
+remain in separate Preferences namespaces.
+
+OTA, resets, Flash operations, packet loss, and radio congestion can interrupt
+remote queries; retry from the client after the device is ready.
+
+## Hardware and timing reference
+
+| Signal | GPIO |
+| :--- | ---: |
+| SX1262 NSS / DIO1 / Reset / Busy | `8 / 14 / 12 / 13` |
+| OLED SDA / SCL / Reset / Vext | `17 / 18 / 21 / 36` |
+| PRG/BOOT | `0` |
+| Battery ADC / measurement enable | `1 / 37` |
+
+| Radio parameter | Default |
 | :--- | :--- |
-| Two receivers appear to have the same identity | Change the default `RXXX` to unique addresses such as `RX01` and `RX02`. |
-| No configuration page opens | Join the Wi-Fi AP shown on page 3, then enter `http://192.168.4.1` explicitly. |
-| Phone reports “no internet” | The AP is local to the board; keep the connection to configure it. |
-| Address changes back after power-off | Check the save result on the web page and serial messages about Preferences. |
-| Packets arrive but acknowledgments fail | Match radio settings and firmware protocol versions; inspect IDs, destinations, CRC errors, and possible simultaneous ACKs. |
-| Only one receiver is reported | The current transmitter confirms on the first valid ACK; it does not collect every receiver's response. |
-| Serial reports page 3 but the OLED stays on page 2 | Use the current display implementation in both sketches; it draws in the OLED task and refreshes every page. Hardware confirmation remains necessary. |
-| Radio initialization fails | Read the error code on serial and verify the selected board and hardware connections. |
+| Frequency / bandwidth | `915.0 MHz / 125.0 kHz` |
+| Spreading factor / coding rate | `SF9 / 4/5` |
+| Sync word / transmit power / preamble | `0x12 / 20 dBm / 8 symbols` |
 
-<details>
-<summary><strong>Serial messages worth checking</strong></summary>
+| RPC parameter | Default |
+| :--- | :--- |
+| Maximum request command | `128 bytes` |
+| Maximum response | `1400 bytes` |
+| Fragment payload / maximum fragments | `160 bytes / 9` |
+| End-to-end job deadline, including queue wait | `60000 ms` |
+| Initial request attempts | `3` |
+| Initial response wait | `5000 ms` |
+| Fragment confirmation wait / attempts | `2500 ms / 3` |
+| Radio turnaround pause | `120 ms` |
+| Request / result queue capacity | `4 / 4` |
+| Maximum UDP input / output | `255 bytes / 1400 bytes` |
 
-The firmware currently uses Portuguese UI and serial labels. Typical diagnostic markers include:
+These are defaults in `Configuracao.h`. Radio settings must match on all boards.
+The maximum LoRa frame is 255 bytes including the RPC header. Old demo interval
+constants, if present, do not schedule any transmissions in the gateway workflow.
 
-```text
-Endereco local: TX01
-WiFi de configuracao: LoRa-TX-XXXXXX
-Configuracao web: http://192.168.4.1
-Receptor que respondeu: RX01
-Novo endereco local: RX02
-OLED Transmissor - pagina 3/3 - quadro enviado
-```
+### Measurement interpretation
 
-The page message is emitted after the frame-send call returns. It does not independently confirm that the physical display received the frame.
+RAM values describe allocator-managed heap, not all physical SRAM. Flash capacity
+is not filesystem free space. CPU temperature comes from the internal sensor,
+not an ambient sensor. Radio mode tracks driver operations rather than performing
+concurrent register probes. Component snapshots are individually synchronized,
+not one atomic board-wide measurement.
 
-</details>
+Battery conversion uses the Heltec V3's nominal divider as described in the
+[official manual](https://s.heltec.cn/download/WiFi_LoRa_32_V3/HTIT-WB32LA_V3%28Rev1.1%29.pdf)
+and [V3.1 schematic](https://s.heltec.cn/download/WiFi_LoRa_32_V3/HTIT-WB32LA%28F%29_V3.1_Schematic_Diagram.pdf).
+Readings are averaged and expose their sample age. Verify with a multimeter and
+adjust `CALIBRACAO_BATERIA` if needed. Voltage does not establish battery presence,
+charge percentage, charger state, or USB power source. Unavailable values are
+reported as `N/D` or JSON `null`.
 
-## Current boundaries and validation
+## Troubleshooting and validation
 
-- **Update every board together.** The addressed protocol is incompatible with the earlier `DATA|ID|message` and `ACK|ID` formats.
-- **First ACK wins.** Group-wide delivery confirmation and ACK collision avoidance are not implemented.
-- **Counters and duplicate tracking are volatile.** The device address is persisted; packet statistics, the transmitter's packet sequence, and the receiver's last-packet record are kept in RAM.
-- **Configuration is local.** The embedded page changes the device address; it does not configure a receiver roster, Wi-Fi station credentials, or radio parameters.
-- **Validation is user-managed.** Compilation and physical tests of the current firmware are performed by the project owner. The badges describe the stack, not passing CI or verified hardware results.
+| Symptom | Check |
+| :--- | :--- |
+| `status:RX01` times out | Matching RPC firmware, receiver address, power, radio settings, and range. |
+| Two receivers answer unpredictably | Configure unique IDs before using both; no broadcast query target is supported. |
+| Gateway responds locally but not remotely | Inspect `radio` and `counters`; remote jobs require the LoRa worker to be ready. |
+| Gateway reports queue full | Retry later; one LoRa transaction runs at a time. |
+| Remote JSON query expires in a custom client | Allow for fragmentation and retry latency; use a timeout longer than the gateway's 60-second job deadline. |
+| Receiver `udp_status` or `ota_status` reports unavailable | Expected: receivers execute diagnostics through LoRa; those network services run only on the gateway. |
+| AP visible but web page unavailable | Read startup errors; invalid AP passwords prevent server initialization. |
+| IDE does not discover OTA | Install ArduinoOTA-enabled firmware, verify same LAN, mDNS and firewall settings. |
 
-See [CHANGELOG.md](CHANGELOG.md) for the implementation history. The changelog and firmware UI retain their existing Portuguese text; this README is in English.
+Compilation and physical firmware/radio/battery tests are **user-managed**. Badges
+describe implemented components, not passing CI or validated hardware performance.
+The command catalog, UI, and changelog retain Portuguese text; this README is English.
 
 ---
 
 <div align="center">
 
-**One radio link. Distinct device identities. Configuration that survives a reboot.**
+**Ask the gateway. Measure the receiver. Return the actual response.**
 
-[Back to top](#esp32-lora-link)
+[Back to top](#esp32-lora-gateway)
 
 </div>

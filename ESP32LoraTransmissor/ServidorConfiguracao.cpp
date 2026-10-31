@@ -1,39 +1,65 @@
 #include "ServidorConfiguracao.h"
 #include "Configuracao.h"
+#include "PaginaConfiguracao.h"
 #include <WiFi.h>
 #include <esp_system.h>
 
 ServidorConfiguracao::ServidorConfiguracao(EnderecoDispositivo& endereco, const char* tipo)
-    : endereco(endereco), tipo(tipo)
-{
-}
+    : endereco(endereco), tipo(tipo) {}
 
 bool ServidorConfiguracao::iniciar()
 {
-    // Sufixo fisico evita redes identicas nos receptores ainda com ID RXXX.
     const uint32_t sufixo = uint32_t(ESP.getEfuseMac() >> 24) & 0xFFFFFF;
     char identificador[7];
     snprintf(identificador, sizeof(identificador), "%06lX", (unsigned long)sufixo);
     ssid = String("LoRa-") + tipo + "-" + identificador;
     token = String(esp_random(), HEX) + String(esp_random(), HEX);
-    if (!WiFi.mode(WIFI_AP))
+    WiFi.persistent(false);
+    if (!WiFi.mode(WIFI_AP_STA))
+    {
+        Serial.println("[WIFI] Falha ao ativar modo AP + STA.");
         return false;
+    }
+    WiFi.setSleep(false);
     const IPAddress ip(192, 168, 4, 1);
     if (!WiFi.softAPConfig(ip, ip, IPAddress(255, 255, 255, 0)))
+    {
+        Serial.println("[WIFI] Falha ao configurar IP do ponto de acesso.");
         return false;
-    if (!WiFi.softAP(ssid.c_str(), Configuracao::SENHA_WIFI_CONFIG))
+    }
+    const char* senhaAP = Configuracao::SENHA_WIFI_CONFIG[0] ? Configuracao::SENHA_WIFI_CONFIG : nullptr;
+    if (!WiFi.softAP(ssid.c_str(), senhaAP))
+    {
+        Serial.println("[WIFI] Falha ao criar o ponto de acesso. Servidor HTTP nao iniciado.");
         return false;
-    servidor.on("/", HTTP_GET, [this]()
-                { mostrarPagina(servidor.arg("salvo") == "1" ? "Endereço salvo na placa." : ""); });
+    }
+    Serial.print("[WIFI] AP ativo: "); Serial.println(WiFi.softAPSSID());
+    if (!wifi.iniciar()) Serial.println("Preferences WiFi indisponiveis; acesso local mantido.");
+    auto pagina = [this]()
+    {
+        String aviso;
+        if (servidor.arg("salvo") == "1") aviso = "Endereço salvo na placa.";
+        if (servidor.arg("wifi") == "1") aviso = "Redes salvas. O transmissor tentará conectar; a rede de configuração permanece disponível.";
+        mostrarPagina(aviso);
+    };
+    servidor.on("/", HTTP_GET, pagina);
+    servidor.on("/config", HTTP_GET, pagina);
     servidor.on("/endereco", HTTP_POST, [this]() { salvarEndereco(); });
-    servidor.onNotFound(
-        [this]() { servidor.send(404, "text/plain; charset=utf-8", "Pagina nao encontrada."); });
+    servidor.on("/wifi", HTTP_POST, [this]() { salvarWiFi(); });
+    servidor.on("/api/wifi", HTTP_GET, [this]() { responderStatusWiFi(); });
+    servidor.on("/api/wifi/scan", HTTP_POST, [this]()
+    {
+        if (ota.ocupado()) { servidor.send(409, "text/plain; charset=utf-8", "Atualizacao OTA em andamento."); return; }
+        if (!tokenValido()) { servidor.send(403, "text/plain; charset=utf-8", "Abra a página novamente para buscar redes."); return; }
+        if (!wifi.buscar()) { servidor.send(409, "text/plain; charset=utf-8", "Busca indisponível agora. Aguarde alguns segundos e tente novamente."); return; }
+        servidor.send(202, "text/plain; charset=utf-8", "Busca iniciada.");
+    });
+    ota.iniciar(servidor, token, progressoOTA, contextoOTA);
+    servidor.onNotFound([this]() { servidor.send(404, "text/plain; charset=utf-8", "Página não encontrada."); });
     servidor.begin();
     ativo = true;
-    Serial.print("WiFi de configuracao: ");
-    Serial.println(ssid);
-    Serial.print("Configuracao web: http://");
-    Serial.println(WiFi.softAPIP());
+    Serial.print("WiFi de configuracao: "); Serial.println(ssid);
+    Serial.print("Configuracao web: http://"); Serial.println(WiFi.softAPIP());
     return true;
 }
 
@@ -44,62 +70,156 @@ String ServidorConfiguracao::nomeRede() const
 
 void ServidorConfiguracao::atender()
 {
-    if (ativo)
-        servidor.handleClient();
+    if (!ativo) return;
+    ota.atender();
+    if (!ota.ocupado()) wifi.processar();
+    servidor.handleClient();
+    ota.atender();
+}
+
+String ServidorConfiguracao::escaparHTML(String valor)
+{
+    valor.replace("&", "&amp;"); valor.replace("<", "&lt;"); valor.replace(">", "&gt;");
+    valor.replace("\"", "&quot;"); valor.replace("'", "&#39;");
+    return valor;
+}
+
+String ServidorConfiguracao::escaparJSON(const String& valor)
+{
+    String saida = "\"";
+    for (size_t i = 0; i < valor.length(); ++i)
+    {
+        const unsigned char c = valor[i];
+        if (c == '"') saida += "\\\"";
+        else if (c == '\\') saida += "\\\\";
+        else if (c < 32)
+        {
+            char escape[7]; snprintf(escape, sizeof(escape), "\\u%04x", unsigned(c)); saida += escape;
+        }
+        else saida += char(c);
+    }
+    return saida + "\"";
+}
+
+bool ServidorConfiguracao::tokenValido()
+{
+    return servidor.hasArg("token") && servidor.arg("token") == token;
 }
 
 void ServidorConfiguracao::mostrarPagina(const String& aviso, int codigo)
 {
-    String pagina = R"HTML(<!doctype html><html lang="pt-BR"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Configuração LoRa</title><style>
-*{box-sizing:border-box}body{margin:0;background:#101b2c;color:#eef4ff;font:16px system-ui,sans-serif;padding:24px}
-main{max-width:480px;margin:6vh auto;background:#1b2a40;border:1px solid #354762;border-radius:20px;padding:28px}
-small{color:#9edaca}h1{font-size:26px;margin:12px 0}p{line-height:1.55;color:#c4d1e4}
-label{display:block;margin:24px 0 8px;font-weight:600}input,button{font:inherit;width:100%;padding:14px;border-radius:10px}
-input{background:#101b2c;color:white;border:1px solid #647995;text-transform:uppercase}
-button{margin-top:18px;background:#8ae0c4;border:0;font-weight:700;color:#10281f;cursor:pointer}
-.aviso{padding:12px;background:#263d55;border-radius:10px}footer{font-size:13px;color:#aebed3;margin-top:24px}
-</style></head><body><main><small>ESP32 · LORA</small><h1>Endereço da placa</h1><p>Dispositivo: )HTML";
-    pagina += tipo;
-    pagina += "</p>";
-    if (aviso.length())
-        pagina += String("<p class='aviso' role='status'>") + aviso + "</p>";
-    pagina += "<form method='post' action='/endereco'><input type='hidden' name='token' value='";
-    pagina += token;
-    pagina += "'><label for='endereco'>Identificação</label><input id='endereco' name='endereco' "
-              "maxlength='16' minlength='1' required autocomplete='off' value='";
-    pagina += endereco.obter();
-    pagina +=
-        "'><p>Use de 1 a 16 letras, números, hífen ou sublinhado. Cada placa deve ter um endereço "
-        "diferente. TODOS é reservado ao broadcast.</p><button type='submit'>Salvar "
-        "endereço</button></form><footer>Salvo na memória da placa. O endereço permanece após "
-        "desligar a placa e pode ser alterado sem reiniciar.</footer></main></body></html>";
+    String campos;
+    for (size_t i = 0; i < GerenciadorWiFi::MAX_REDES; ++i)
+    {
+        const String n = String((unsigned int)i);
+        const auto& rede = wifi.rede(i);
+        campos += String("<fieldset class='network'><legend>Rede ") + (i + 1) + "</legend>";
+        campos += "<label for='ssid" + n + "'>Nome da rede (SSID)</label><input id='ssid" + n + "' name='ssid" + n + "' autocomplete='off' value='" + escaparHTML(String(rede.ssid)) + "'>";
+        campos += "<label for='senha" + n + "'>Senha</label><input type='password' id='senha" + n + "' name='senha" + n + "' maxlength='64' autocomplete='new-password' placeholder='";
+        campos += rede.senha[0] ? "Senha salva — deixe vazio para manter" : "Senha da rede ou vazio para rede aberta";
+        campos += "'><label class='check'><input type='checkbox' id='aberta" + n + "' name='aberta" + n + "' value='1'>Rede aberta (remover senha)</label></fieldset>";
+    }
+    String pagina(PAGINA_CONFIGURACAO);
+    // Insere campos por ultimo: SSIDs que contem chaves de template ficam literais.
+    pagina.replace("{{ERRO}}", codigo >= 400 ? "error" : "");
+    pagina.replace("{{AVISO}}", escaparHTML(aviso));
+    pagina.replace("{{AP}}", escaparHTML(ssid));
+    pagina.replace("{{ENDERECO}}", escaparHTML(endereco.obter()));
+    pagina.replace("{{TOKEN}}", token);
+    pagina.replace("{{REDES}}", campos);
     servidor.sendHeader("Cache-Control", "no-store");
     servidor.send(codigo, "text/html; charset=utf-8", pagina);
 }
 
 void ServidorConfiguracao::salvarEndereco()
 {
-    if (!servidor.hasArg("token") || servidor.arg("token") != token)
-    {
-        mostrarPagina("Solicitação expirada. Abra a página novamente.", 403);
-        return;
-    }
-    String novo = servidor.arg("endereco");
-    novo.trim();
-    novo.toUpperCase();
+    if (ota.ocupado()) { mostrarPagina("Atualização OTA em andamento. Aguarde o reinício.", 409); return; }
+    if (!tokenValido()) { mostrarPagina("Solicitação expirada. Abra a página novamente.", 403); return; }
+    String novo = servidor.arg("endereco"); novo.trim(); novo.toUpperCase();
     if (!EnderecoDispositivo::valido(novo))
-    {
-        mostrarPagina("Endereço inválido. Use de 1 a 16 caracteres permitidos; TODOS é reservado.",
-                      400);
-        return;
-    }
+    { mostrarPagina("Endereço inválido. Use de 1 a 16 caracteres permitidos; TODOS é reservado.", 400); return; }
     if (!endereco.salvar(novo))
-    {
-        mostrarPagina("Não foi possível gravar. O endereço anterior foi mantido.", 500);
-        return;
-    }
-    servidor.sendHeader("Location", "/?salvo=1");
+    { mostrarPagina("Não foi possível gravar. O endereço anterior foi mantido.", 500); return; }
+    servidor.sendHeader("Location", "/config?salvo=1");
     servidor.send(303, "text/plain", "Endereco salvo.");
+}
+
+void ServidorConfiguracao::salvarWiFi()
+{
+    if (ota.ocupado()) { mostrarPagina("Atualização OTA em andamento. Aguarde o reinício.", 409); return; }
+    if (!tokenValido()) { mostrarPagina("Solicitação expirada. Abra a página novamente.", 403); return; }
+    GerenciadorWiFi::RedeSalva novas[GerenciadorWiFi::MAX_REDES] = {};
+    for (size_t i = 0; i < GerenciadorWiFi::MAX_REDES; ++i)
+    {
+        const String n = String((unsigned int)i);
+        if (!servidor.hasArg("ssid" + n) || !servidor.hasArg("senha" + n))
+        { mostrarPagina("Formulário incompleto. Abra a página novamente.", 400); return; }
+        const String nome = servidor.arg("ssid" + n);
+        String senha = servidor.arg("senha" + n);
+        if (nome.isEmpty()) continue; // Apaga este slot e a senha associada.
+        bool nomeValido = nome.length() <= 32;
+        for (size_t j = 0; j < nome.length(); ++j) if (nome[j] == '\0') nomeValido = false;
+        if (!nomeValido)
+        { mostrarPagina("SSID inválido: o nome deve ter até 32 bytes.", 400); return; }
+        const auto& anterior = wifi.rede(i);
+        if (servidor.arg("aberta" + n) == "1") senha = "";
+        else if (senha.isEmpty() && nome == anterior.ssid) senha = anterior.senha;
+        if (!GerenciadorWiFi::senhaValida(senha))
+        { mostrarPagina("Senha inválida: use 8 a 63 caracteres, 64 dígitos hexadecimais ou uma rede aberta.", 400); return; }
+        nome.toCharArray(novas[i].ssid, sizeof(novas[i].ssid));
+        senha.toCharArray(novas[i].senha, sizeof(novas[i].senha));
+    }
+    if (!wifi.salvar(novas))
+    { mostrarPagina("Não foi possível gravar as redes. A configuração anterior foi mantida.", 500); return; }
+    servidor.sendHeader("Location", "/config?wifi=1");
+    servidor.send(303, "text/plain", "Redes salvas.");
+}
+
+void ServidorConfiguracao::responderStatusWiFi()
+{
+    const bool conectado = WiFi.status() == WL_CONNECTED;
+    String json = String("{\"conectado\":") + (conectado ? "true" : "false");
+    json += ",\"estado\":" + escaparJSON(wifi.estado());
+    json += ",\"rede\":" + escaparJSON(conectado ? WiFi.SSID() : String());
+    json += ",\"ip\":" + escaparJSON(conectado ? WiFi.localIP().toString() : String());
+    json += ",\"rssi\":" + String(conectado ? WiFi.RSSI() : -127);
+    json += String(",\"buscando\":") + (wifi.buscando() ? "true" : "false");
+    json += ",\"erroBusca\":" + escaparJSON(wifi.erroDaBusca());
+    json += ",\"redes\":[";
+    for (size_t i = 0; i < wifi.quantidadeEncontrada(); ++i)
+    {
+        if (i) json += ",";
+        const auto& rede = wifi.encontrada(i);
+        json += "{\"ssid\":" + escaparJSON(rede.ssid) + ",\"rssi\":" + String(rede.rssi);
+        json += String(",\"aberta\":") + (rede.aberta ? "true" : "false") + "}";
+    }
+    json += "]}";
+    servidor.sendHeader("Cache-Control", "no-store");
+    servidor.send(200, "application/json; charset=utf-8", json);
+}
+
+void ServidorConfiguracao::definirProgressoOTA(ServicoOTA::Progresso callback, void* contexto)
+{
+    progressoOTA = callback;
+    contextoOTA = contexto;
+}
+
+ServidorConfiguracao::InformacoesRede ServidorConfiguracao::informacoesRede() const
+{
+    InformacoesRede info;
+    const IPAddress ipEstacao = WiFi.localIP();
+    if (ativo && WiFi.status() == WL_CONNECTED && uint32_t(ipEstacao) != 0)
+    {
+        info.ssid = WiFi.SSID();
+        info.ip = ipEstacao.toString();
+        info.conectada = true;
+    }
+    else
+    {
+        const IPAddress ipAP = WiFi.softAPIP();
+        const bool apAtivo = ativo && (WiFi.getMode() & WIFI_AP) && uint32_t(ipAP) != 0;
+        info.ssid = apAtivo ? ssid : String("WiFi indisponivel");
+        info.ip = apAtivo ? ipAP.toString() : String("sem IP");
+    }
+    return info;
 }

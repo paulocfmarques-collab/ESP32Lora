@@ -1,7 +1,8 @@
 #pragma once
 #include <Arduino.h>
 #include <WebServer.h>
-#include "EnderecoDispositivo.h"
+#include "../EnderecoDispositivo.h"
+#include "../EstadoOTA.h"
 
 class ServidorConfiguracao
 {
@@ -10,6 +11,7 @@ class ServidorConfiguracao
     bool iniciar();
     void atender();
     String nomeRede() const;
+    EstadoOTA estadoOTA() const { return EstadoOTA{}; }
 
   private:
     void mostrarPagina(const String& aviso = String(), int codigo = 200);

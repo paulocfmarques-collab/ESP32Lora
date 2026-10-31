@@ -16,13 +16,28 @@ bool ServidorConfiguracao::iniciar()
     snprintf(identificador, sizeof(identificador), "%06lX", (unsigned long)sufixo);
     ssid = String("LoRa-") + tipo + "-" + identificador;
     token = String(esp_random(), HEX) + String(esp_random(), HEX);
+    WiFi.persistent(false);
     if (!WiFi.mode(WIFI_AP))
+    {
+        Serial.println("[WIFI] Falha ao ativar modo AP.");
         return false;
+    }
+    WiFi.setSleep(false);
     const IPAddress ip(192, 168, 4, 1);
     if (!WiFi.softAPConfig(ip, ip, IPAddress(255, 255, 255, 0)))
+    {
+        Serial.println("[WIFI] Falha ao configurar IP do ponto de acesso.");
         return false;
-    if (!WiFi.softAP(ssid.c_str(), Configuracao::SENHA_WIFI_CONFIG))
+    }
+    const char* senhaAP =
+        Configuracao::SENHA_WIFI_CONFIG[0] ? Configuracao::SENHA_WIFI_CONFIG : nullptr;
+    if (!WiFi.softAP(ssid.c_str(), senhaAP))
+    {
+        Serial.println("[WIFI] Falha ao criar o ponto de acesso. Servidor HTTP nao iniciado.");
         return false;
+    }
+    Serial.print("[WIFI] AP ativo: ");
+    Serial.println(WiFi.softAPSSID());
     servidor.on("/", HTTP_GET, [this]()
                 { mostrarPagina(servidor.arg("salvo") == "1" ? "Endereço salvo na placa." : ""); });
     servidor.on("/endereco", HTTP_POST, [this]() { salvarEndereco(); });
